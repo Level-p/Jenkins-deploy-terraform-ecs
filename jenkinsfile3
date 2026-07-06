@@ -1,0 +1,160 @@
+pipeline {
+    agent any 
+
+    parameters {
+        choice ([
+            name: 'action',
+            choices: ['apply' , 'destroy'],
+            description: "Terraform action"
+        ])
+    }
+
+    environment [
+        SLACKCREDENTIALS = credentials("slack-cred")
+        AWS_REGION = "eu-west-2"
+        SLACKCHANNEK = 'varsitix'
+    ]
+
+    triggers{
+        pollSCM("* * * * 2")
+    }
+    
+    tools{
+        maven("maven2")
+        node("node18")
+    }
+
+    stages{
+        stage ('CheckOut') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage ('Verify tools') {
+            steps {
+                sh ''' 
+                    set -e
+                    which java
+                    which terraform
+                    which docker
+                    which aws
+                '''
+            }
+        }
+
+        stage ('Load Terraform tfvars') {
+            steps {
+                withCredentials([file(credentialsId: 'terraform.tfvars' , variable: 'TFVARS_FILE')]) {
+                    sh ''' 
+                        cp "$TVARS_FILE" terraform.tfvars
+                        chmod 600 terraform.tfvars
+                        ls -la terraform.tfvars
+                    '''
+                }
+            }
+        }
+
+        stage ("Terraform Init") {
+            steps {
+                sh ''' 
+                    terraform init
+                '''
+            }
+        }
+
+        stage ("Terraform Plan") {
+            when {
+                    expression { params.action == 'apply'}
+            }
+            steps {
+                sh ''' 
+                    terraforn plan
+                '''
+            }
+        }
+
+        stage ("Terraform Apply") {
+            when {
+                    expression { params.action == 'apply'}
+            }
+            steps {
+                sh ''' 
+                    terraforn apply --auto-approve
+                '''
+            }
+        }
+
+        // stage ("Terraform action") {
+        //     steps {
+        //         script {
+        //             sh "terraform ${params.action} --auto-approve"
+        //         }
+        //     }
+        // }
+
+        stage ("Get Terraform Output") {
+            when {
+                    expression { params.action == 'apply'}
+            }
+            steps {
+                script {
+                    env.ECR_URL = sh(
+                        script: "terraform output -raw ecr_repository_url > ../ecr_url.txt",
+                        returnStdout: true
+                    ).trim()
+
+                    env.ECR_CLUSTER = sh(
+                        script: "terraform output -raw ecr_cluster_name > ../ecr_url.txt",
+                        returnStdout: true
+                    ).trim()
+
+                    env.ECR_SERVICE = sh(
+                        script: "terraform output -raw ecr_service_name > ../ecr_url.txt",
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+
+        stage ("Terraform Destroy") {
+            when {
+                expression {params.action = "destroy"}
+            }
+
+            steps {
+                sh ''' 
+                    terraform destroy --auto-approve 
+                '''
+            }
+        }
+    }
+
+    post{
+        always {
+            script {
+                slackSend(
+                    channel: SLACKCHANNEL,
+                    color: currentBuild.result == 'SUCCESS' ? 'good' : 'danger',
+                    message: "Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL}) has been completed."
+                )
+            }
+        }
+
+        failure {
+            slackSend(
+                channel: SLACKCHANNEL,
+                color: 'danger',
+                message: "Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' has failed. Check console output at ${env.BUILD_URL}."  
+            )
+        }
+
+        success {
+            slackSend(
+                channel: SLACKCHANNEL,
+                color: 'good',
+                message: "Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' has failed. Check console output at ${env.BUILD_URL}."  
+            )
+        }
+    }
+}
